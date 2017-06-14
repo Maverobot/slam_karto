@@ -32,9 +32,11 @@
 #include "tf/message_filter.h"
 #include "visualization_msgs/MarkerArray.h"
 
+
 #include "nav_msgs/MapMetaData.h"
 #include "sensor_msgs/LaserScan.h"
 #include "nav_msgs/GetMap.h"
+#include "std_srvs/Empty.h"
 
 #include "open_karto/Mapper.h"
 
@@ -45,6 +47,13 @@
 #include <string>
 #include <map>
 #include <vector>
+
+// serialization
+#include <boost/serialization/map.hpp>
+#include <boost/serialization/vector.hpp>
+#include <boost/archive/xml_oarchive.hpp>
+#include <boost/archive/xml_iarchive.hpp>
+//#define BOOST_SERIALIZATION_DYN_LINK 1
 
 // compute linear index for given map coords
 #define MAP_IDX(sx, i, j) ((sx) * (j) + (i))
@@ -58,6 +67,10 @@ class SlamKarto
     void laserCallback(const sensor_msgs::LaserScan::ConstPtr& scan);
     bool mapCallback(nav_msgs::GetMap::Request  &req,
                      nav_msgs::GetMap::Response &res);
+    bool saveMapCallback(std_srvs::Empty::Request  &req,
+                     std_srvs::Empty::Response &res);
+    bool loadMapCallback(std_srvs::Empty::Request  &req,
+                     std_srvs::Empty::Response &res);
 
   private:
     bool getOdomPose(karto::Pose2& karto_pose, const ros::Time& t);
@@ -80,6 +93,8 @@ class SlamKarto
     ros::Publisher marker_publisher_;
     ros::Publisher sstm_;
     ros::ServiceServer ss_;
+    ros::ServiceServer sm_;
+    ros::ServiceServer lm_;
 
     // The map that will be published / send to service callers
     nav_msgs::GetMap::Response map_;
@@ -141,11 +156,15 @@ SlamKarto::SlamKarto() :
   double transform_publish_period;
   private_nh_.param("transform_publish_period", transform_publish_period, 0.05);
 
+  // save map service 
+
   // Set up advertisements and subscriptions
   tfB_ = new tf::TransformBroadcaster();
   sst_ = node_.advertise<nav_msgs::OccupancyGrid>("map", 1, true);
   sstm_ = node_.advertise<nav_msgs::MapMetaData>("map_metadata", 1, true);
   ss_ = node_.advertiseService("dynamic_map", &SlamKarto::mapCallback, this);
+  sm_ = node_.advertiseService("save_map", &SlamKarto::saveMapCallback, this);
+  lm_ = node_.advertiseService("load_map", &SlamKarto::loadMapCallback, this);
   scan_filter_sub_ = new message_filters::Subscriber<sensor_msgs::LaserScan>(node_, "scan", 5);
   scan_filter_ = new tf::MessageFilter<sensor_msgs::LaserScan>(*scan_filter_sub_, tf_, odom_frame_, 5);
   scan_filter_->registerCallback(boost::bind(&SlamKarto::laserCallback, this, _1));
@@ -429,302 +448,337 @@ SlamKarto::getOdomPose(karto::Pose2& karto_pose, const ros::Time& t)
 
   karto_pose = 
           karto::Pose2(odom_pose.getOrigin().x(),
-                       odom_pose.getOrigin().y(),
-                       yaw);
+				  odom_pose.getOrigin().y(),
+				  yaw);
   return true;
 }
 
-void
+	bool
+SlamKarto::loadMapCallback(std_srvs::Empty::Request& req, std_srvs::Empty::Response& res)
+{
+	ROS_INFO("slam_karto save map callback");
+	try {
+		std::string f("/tmp/map.xml");
+		mapper_->LoadFromFile(f);
+		return true;
+	} catch (boost::archive::archive_exception e) {
+		ROS_ERROR("%s", e.what());
+		return false;	
+	}
+}	
+
+	bool
+SlamKarto::saveMapCallback(std_srvs::Empty::Request& req, std_srvs::Empty::Response& res)
+{
+	ROS_INFO("slam_karto save map callback");
+	try {
+		std::string f("/tmp/map.xml");
+		mapper_->SaveToFile(f);
+		return true;
+	} catch (boost::archive::archive_exception e) {
+		ROS_ERROR("%s", e.what());
+		return false;	
+	}
+}	
+
+	void
 SlamKarto::publishGraphVisualization()
 {
-  std::vector<float> graph;
-  solver_->getGraph(graph);
+	std::vector<float> graph;
+	solver_->getGraph(graph);
 
-  visualization_msgs::MarkerArray marray;
+	visualization_msgs::MarkerArray marray;
 
-  visualization_msgs::Marker m;
-  m.header.frame_id = "map";
-  m.header.stamp = ros::Time::now();
-  m.id = 0;
-  m.ns = "karto";
-  m.type = visualization_msgs::Marker::SPHERE;
-  m.pose.position.x = 0.0;
-  m.pose.position.y = 0.0;
-  m.pose.position.z = 0.0;
-  m.scale.x = 0.1;
-  m.scale.y = 0.1;
-  m.scale.z = 0.1;
-  m.color.r = 1.0;
-  m.color.g = 0;
-  m.color.b = 0.0;
-  m.color.a = 1.0;
-  m.lifetime = ros::Duration(0);
+	visualization_msgs::Marker m;
+	m.header.frame_id = "map";
+	m.header.stamp = ros::Time::now();
+	m.id = 0;
+	m.ns = "karto";
+	m.type = visualization_msgs::Marker::SPHERE;
+	m.pose.position.x = 0.0;
+	m.pose.position.y = 0.0;
+	m.pose.position.z = 0.0;
+	m.scale.x = 0.1;
+	m.scale.y = 0.1;
+	m.scale.z = 0.1;
+	m.color.r = 1.0;
+	m.color.g = 0;
+	m.color.b = 0.0;
+	m.color.a = 1.0;
+	m.lifetime = ros::Duration(0);
 
-  visualization_msgs::Marker edge;
-  edge.header.frame_id = "map";
-  edge.header.stamp = ros::Time::now();
-  edge.action = visualization_msgs::Marker::ADD;
-  edge.ns = "karto";
-  edge.id = 0;
-  edge.type = visualization_msgs::Marker::LINE_STRIP;
-  edge.scale.x = 0.1;
-  edge.scale.y = 0.1;
-  edge.scale.z = 0.1;
-  edge.color.a = 1.0;
-  edge.color.r = 0.0;
-  edge.color.g = 0.0;
-  edge.color.b = 1.0;
+	visualization_msgs::Marker edge;
+	edge.header.frame_id = "map";
+	edge.header.stamp = ros::Time::now();
+	edge.action = visualization_msgs::Marker::ADD;
+	edge.ns = "karto";
+	edge.id = 0;
+	edge.type = visualization_msgs::Marker::LINE_STRIP;
+	edge.scale.x = 0.1;
+	edge.scale.y = 0.1;
+	edge.scale.z = 0.1;
+	edge.color.a = 1.0;
+	edge.color.r = 0.0;
+	edge.color.g = 0.0;
+	edge.color.b = 1.0;
 
-  m.action = visualization_msgs::Marker::ADD;
-  uint id = 0;
-  for (uint i=0; i<graph.size()/2; i++) 
-  {
-    m.id = id;
-    m.pose.position.x = graph[2*i];
-    m.pose.position.y = graph[2*i+1];
-    marray.markers.push_back(visualization_msgs::Marker(m));
-    id++;
+	m.action = visualization_msgs::Marker::ADD;
+	uint id = 0;
+	for (uint i=0; i<graph.size()/2; i++) 
+	{
+		m.id = id;
+		m.pose.position.x = graph[2*i];
+		m.pose.position.y = graph[2*i+1];
+		marray.markers.push_back(visualization_msgs::Marker(m));
+		id++;
 
-    if(i>0)
-    {
-      edge.points.clear();
+		if(i>0)
+		{
+			edge.points.clear();
 
-      geometry_msgs::Point p;
-      p.x = graph[2*(i-1)];
-      p.y = graph[2*(i-1)+1];
-      edge.points.push_back(p);
-      p.x = graph[2*i];
-      p.y = graph[2*i+1];
-      edge.points.push_back(p);
-      edge.id = id;
+			geometry_msgs::Point p;
+			p.x = graph[2*(i-1)];
+			p.y = graph[2*(i-1)+1];
+			edge.points.push_back(p);
+			p.x = graph[2*i];
+			p.y = graph[2*i+1];
+			edge.points.push_back(p);
+			edge.id = id;
 
-      marray.markers.push_back(visualization_msgs::Marker(edge));
-      id++;
-    }
-  }
+			marray.markers.push_back(visualization_msgs::Marker(edge));
+			id++;
+		}
+	}
 
-  m.action = visualization_msgs::Marker::DELETE;
-  for (; id < marker_count_; id++) 
-  {
-    m.id = id;
-    marray.markers.push_back(visualization_msgs::Marker(m));
-  }
+	m.action = visualization_msgs::Marker::DELETE;
+	for (; id < marker_count_; id++) 
+	{
+		m.id = id;
+		marray.markers.push_back(visualization_msgs::Marker(m));
+	}
 
-  marker_count_ = marray.markers.size();
+	marker_count_ = marray.markers.size();
 
-  marker_publisher_.publish(marray);
+	marker_publisher_.publish(marray);
 }
 
-void
+	void
 SlamKarto::laserCallback(const sensor_msgs::LaserScan::ConstPtr& scan)
 {
-  laser_count_++;
-  if ((laser_count_ % throttle_scans_) != 0)
-    return;
+	laser_count_++;
+	if ((laser_count_ % throttle_scans_) != 0)
+		return;
 
-  static ros::Time last_map_update(0,0);
+	static ros::Time last_map_update(0,0);
 
-  // Check whether we know about this laser yet
-  karto::LaserRangeFinder* laser = getLaser(scan);
+	// Check whether we know about this laser yet
+	karto::LaserRangeFinder* laser = getLaser(scan);
 
-  if(!laser)
-  {
-    ROS_WARN("Failed to create laser device for %s; discarding scan",
-	     scan->header.frame_id.c_str());
-    return;
-  }
+	if(!laser)
+	{
+		ROS_WARN("Failed to create laser device for %s; discarding scan",
+				scan->header.frame_id.c_str());
+		return;
+	}
 
-  karto::Pose2 odom_pose;
-  if(addScan(laser, scan, odom_pose))
-  {
-    ROS_DEBUG("added scan at pose: %.3f %.3f %.3f", 
-              odom_pose.GetX(),
-              odom_pose.GetY(),
-              odom_pose.GetHeading());
+	karto::Pose2 odom_pose;
+	if(addScan(laser, scan, odom_pose))
+	{
+		ROS_DEBUG("added scan at pose: %.3f %.3f %.3f", 
+				odom_pose.GetX(),
+				odom_pose.GetY(),
+				odom_pose.GetHeading());
 
-    publishGraphVisualization();
+		publishGraphVisualization();
 
-    if(!got_map_ || 
-       (scan->header.stamp - last_map_update) > map_update_interval_)
-    {
-      if(updateMap())
-      {
-        last_map_update = scan->header.stamp;
-        got_map_ = true;
-        ROS_DEBUG("Updated the map");
-      }
-    }
-  }
+		if(!got_map_ || 
+				(scan->header.stamp - last_map_update) > map_update_interval_)
+		{
+			if(updateMap())
+			{
+				last_map_update = scan->header.stamp;
+				got_map_ = true;
+				ROS_DEBUG("Updated the map");
+			}
+		}
+	}
 }
 
-bool
+	bool
 SlamKarto::updateMap()
 {
-  boost::mutex::scoped_lock lock(map_mutex_);
+	boost::mutex::scoped_lock lock(map_mutex_);
 
-  karto::OccupancyGrid* occ_grid = 
-          karto::OccupancyGrid::CreateFromScans(mapper_->GetAllProcessedScans(), resolution_);
+	karto::OccupancyGrid* occ_grid = 
+		karto::OccupancyGrid::CreateFromScans(mapper_->GetAllProcessedScans(), resolution_);
 
-  if(!occ_grid)
-    return false;
+	if(!occ_grid)
+		return false;
 
-  if(!got_map_) {
-    map_.map.info.resolution = resolution_;
-    map_.map.info.origin.position.x = 0.0;
-    map_.map.info.origin.position.y = 0.0;
-    map_.map.info.origin.position.z = 0.0;
-    map_.map.info.origin.orientation.x = 0.0;
-    map_.map.info.origin.orientation.y = 0.0;
-    map_.map.info.origin.orientation.z = 0.0;
-    map_.map.info.origin.orientation.w = 1.0;
-  } 
+	if(!got_map_) {
+		map_.map.info.resolution = resolution_;
+		map_.map.info.origin.position.x = 0.0;
+		map_.map.info.origin.position.y = 0.0;
+		map_.map.info.origin.position.z = 0.0;
+		map_.map.info.origin.orientation.x = 0.0;
+		map_.map.info.origin.orientation.y = 0.0;
+		map_.map.info.origin.orientation.z = 0.0;
+		map_.map.info.origin.orientation.w = 1.0;
+	} 
 
-  // Translate to ROS format
-  kt_int32s width = occ_grid->GetWidth();
-  kt_int32s height = occ_grid->GetHeight();
-  karto::Vector2<kt_double> offset = occ_grid->GetCoordinateConverter()->GetOffset();
+	// Translate to ROS format
+	kt_int32s width = occ_grid->GetWidth();
+	kt_int32s height = occ_grid->GetHeight();
+	karto::Vector2<kt_double> offset = occ_grid->GetCoordinateConverter()->GetOffset();
 
-  if(map_.map.info.width != (unsigned int) width || 
-     map_.map.info.height != (unsigned int) height ||
-     map_.map.info.origin.position.x != offset.GetX() ||
-     map_.map.info.origin.position.y != offset.GetY())
-  {
-    map_.map.info.origin.position.x = offset.GetX();
-    map_.map.info.origin.position.y = offset.GetY();
-    map_.map.info.width = width;
-    map_.map.info.height = height;
-    map_.map.data.resize(map_.map.info.width * map_.map.info.height);
-  }
+	if(map_.map.info.width != (unsigned int) width || 
+			map_.map.info.height != (unsigned int) height ||
+			map_.map.info.origin.position.x != offset.GetX() ||
+			map_.map.info.origin.position.y != offset.GetY())
+	{
+		map_.map.info.origin.position.x = offset.GetX();
+		map_.map.info.origin.position.y = offset.GetY();
+		map_.map.info.width = width;
+		map_.map.info.height = height;
+		map_.map.data.resize(map_.map.info.width * map_.map.info.height);
+	}
 
-  for (kt_int32s y=0; y<height; y++)
-  {
-    for (kt_int32s x=0; x<width; x++) 
-    {
-      // Getting the value at position x,y
-      kt_int8u value = occ_grid->GetValue(karto::Vector2<kt_int32s>(x, y));
+	for (kt_int32s y=0; y<height; y++)
+	{
+		for (kt_int32s x=0; x<width; x++) 
+		{
+			// Getting the value at position x,y
+			kt_int8u value = occ_grid->GetValue(karto::Vector2<kt_int32s>(x, y));
 
-      switch (value)
-      {
-        case karto::GridStates_Unknown:
-          map_.map.data[MAP_IDX(map_.map.info.width, x, y)] = -1;
-          break;
-        case karto::GridStates_Occupied:
-          map_.map.data[MAP_IDX(map_.map.info.width, x, y)] = 100;
-          break;
-        case karto::GridStates_Free:
-          map_.map.data[MAP_IDX(map_.map.info.width, x, y)] = 0;
-          break;
-        default:
-          ROS_WARN("Encountered unknown cell value at %d, %d", x, y);
-          break;
-      }
-    }
-  }
-  
-  // Set the header information on the map
-  map_.map.header.stamp = ros::Time::now();
-  map_.map.header.frame_id = map_frame_;
+			switch (value)
+			{
+				case karto::GridStates_Unknown:
+					map_.map.data[MAP_IDX(map_.map.info.width, x, y)] = -1;
+					break;
+				case karto::GridStates_Occupied:
+					map_.map.data[MAP_IDX(map_.map.info.width, x, y)] = 100;
+					break;
+				case karto::GridStates_Free:
+					map_.map.data[MAP_IDX(map_.map.info.width, x, y)] = 0;
+					break;
+				default:
+					ROS_WARN("Encountered unknown cell value at %d, %d", x, y);
+					break;
+			}
+		}
+	}
 
-  sst_.publish(map_.map);
-  sstm_.publish(map_.map.info);
+	// Set the header information on the map
+	map_.map.header.stamp = ros::Time::now();
+	map_.map.header.frame_id = map_frame_;
 
-  delete occ_grid;
+	sst_.publish(map_.map);
+	sstm_.publish(map_.map.info);
 
-  return true;
+	delete occ_grid;
+
+	return true;
 }
 
-bool
+	bool
 SlamKarto::addScan(karto::LaserRangeFinder* laser,
-		   const sensor_msgs::LaserScan::ConstPtr& scan, 
-                   karto::Pose2& karto_pose)
+		const sensor_msgs::LaserScan::ConstPtr& scan, 
+		karto::Pose2& karto_pose)
 {
-  if(!getOdomPose(karto_pose, scan->header.stamp))
-     return false;
-  
-  // Create a vector of doubles for karto
-  std::vector<kt_double> readings;
+	if(!getOdomPose(karto_pose, scan->header.stamp))
+		return false;
 
-  if (lasers_inverted_[scan->header.frame_id]) {
-    for(std::vector<float>::const_reverse_iterator it = scan->ranges.rbegin();
-      it != scan->ranges.rend();
-      ++it)
-    {
-      readings.push_back(*it);
-    }
-  } else {
-    for(std::vector<float>::const_iterator it = scan->ranges.begin();
-      it != scan->ranges.end();
-      ++it)
-    {
-      readings.push_back(*it);
-    }
-  }
-  
-  // create localized range scan
-  karto::LocalizedRangeScan* range_scan = 
-    new karto::LocalizedRangeScan(laser->GetName(), readings);
-  range_scan->SetOdometricPose(karto_pose);
-  range_scan->SetCorrectedPose(karto_pose);
+	// Create a vector of doubles for karto
+	std::vector<kt_double> readings;
 
-  // Add the localized range scan to the mapper
-  bool processed;
-  if((processed = mapper_->Process(range_scan)))
-  {
-    //std::cout << "Pose: " << range_scan->GetOdometricPose() << " Corrected Pose: " << range_scan->GetCorrectedPose() << std::endl;
-    
-    karto::Pose2 corrected_pose = range_scan->GetCorrectedPose();
+	if (lasers_inverted_[scan->header.frame_id]) {
+		for(std::vector<float>::const_reverse_iterator it = scan->ranges.rbegin();
+				it != scan->ranges.rend();
+				++it)
+		{
+			readings.push_back(*it);
+		}
+	} else {
+		for(std::vector<float>::const_iterator it = scan->ranges.begin();
+				it != scan->ranges.end();
+				++it)
+		{
+			readings.push_back(*it);
+		}
+	}
 
-    // Compute the map->odom transform
-    tf::Stamped<tf::Pose> odom_to_map;
-    try
-    {
-      tf_.transformPose(odom_frame_,tf::Stamped<tf::Pose> (tf::Transform(tf::createQuaternionFromRPY(0, 0, corrected_pose.GetHeading()),
-                                                                    tf::Vector3(corrected_pose.GetX(), corrected_pose.GetY(), 0.0)).inverse(),
-                                                                    scan->header.stamp, base_frame_),odom_to_map);
-    }
-    catch(tf::TransformException e)
-    {
-      ROS_ERROR("Transform from base_link to odom failed\n");
-      odom_to_map.setIdentity();
-    }
+	// create localized range scan
+	karto::LocalizedRangeScan* range_scan = 
+		new karto::LocalizedRangeScan(laser->GetName(), readings);
+	range_scan->SetOdometricPose(karto_pose);
+	range_scan->SetCorrectedPose(karto_pose);
 
-    map_to_odom_mutex_.lock();
-    map_to_odom_ = tf::Transform(tf::Quaternion( odom_to_map.getRotation() ),
-                                 tf::Point(      odom_to_map.getOrigin() ) ).inverse();
-    map_to_odom_mutex_.unlock();
+	// Add the localized range scan to the mapper
+	bool processed;
+	if((processed = mapper_->Process(range_scan)))
+	{
+		//std::cout << "Pose: " << range_scan->GetOdometricPose() << " Corrected Pose: " << range_scan->GetCorrectedPose() << std::endl;
+
+		karto::Pose2 corrected_pose = range_scan->GetCorrectedPose();
+
+		// Compute the map->odom transform
+		tf::Stamped<tf::Pose> odom_to_map;
+		try
+		{
+			tf_.transformPose(odom_frame_,tf::Stamped<tf::Pose> (tf::Transform(tf::createQuaternionFromRPY(0, 0, corrected_pose.GetHeading()),
+							tf::Vector3(corrected_pose.GetX(), corrected_pose.GetY(), 0.0)).inverse(),
+						scan->header.stamp, base_frame_),odom_to_map);
+		}
+		catch(tf::TransformException e)
+		{
+			ROS_ERROR("Transform from base_link to odom failed\n");
+			odom_to_map.setIdentity();
+		}
+
+		map_to_odom_mutex_.lock();
+		map_to_odom_ = tf::Transform(tf::Quaternion( odom_to_map.getRotation() ),
+				tf::Point(      odom_to_map.getOrigin() ) ).inverse();
+		map_to_odom_mutex_.unlock();
 
 
-    // Add the localized range scan to the dataset (for memory management)
-    dataset_->Add(range_scan);
-  }
-  else
-    delete range_scan;
+		// Add the localized range scan to the dataset (for memory management)
+		dataset_->Add(range_scan);
+	}
+	else
+		delete range_scan;
 
-  return processed;
+	return processed;
 }
 
-bool 
+	bool 
 SlamKarto::mapCallback(nav_msgs::GetMap::Request  &req,
-                       nav_msgs::GetMap::Response &res)
+		nav_msgs::GetMap::Response &res)
 {
-  boost::mutex::scoped_lock lock(map_mutex_);
-  if(got_map_ && map_.map.info.width && map_.map.info.height)
-  {
-    res = map_;
-    return true;
-  }
-  else
-    return false;
+	boost::mutex::scoped_lock lock(map_mutex_);
+	if(got_map_ && map_.map.info.width && map_.map.info.height)
+	{
+		res = map_;
+		return true;
+	}
+	else
+		return false;
 }
 
-int
+//BOOST_CLASS_EXPORT_GUID(karto::NonCopyable, "karto::NonCopyable")
+//BOOST_CLASS_EXPORT_GUID(karto::Dataset, "karto::Dataset")
+//BOOST_CLASS_EXPORT_GUID(karto::Object, "karto::Object")
+//BOOST_CLASS_EXPORT_GUID(karto::Name, "karto::Name")
+//BOOST_CLASS_EXPORT_GUID(karto::ParameterManager, "karto::ParameterManager")
+//BOOST_CLASS_EXPORT_GUID(karto::AbstractParameter, "karto::AbstractParameter")
+
+	int
 main(int argc, char** argv)
 {
-  ros::init(argc, argv, "slam_karto");
+	ros::init(argc, argv, "slam_karto");
 
-  SlamKarto kn;
+	SlamKarto kn;
 
-  ros::spin();
+	ros::spin();
 
-  return 0;
+	return 0;
 }
